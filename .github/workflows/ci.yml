@@ -1,0 +1,184 @@
+# Copyright (c) 2025-2026 fei_cong(https://github.com/feicong/feicong-course)
+
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Target release tag (leave empty to use "latest")
+        required: false
+        default: ""
+        type: string
+      upload:
+        description: Upload artifacts to GitHub Release
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install LLVM 19
+        run: |
+          echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/llvm.gpg
+          sudo apt-get update
+          sudo apt-get install -y llvm-19-dev clang-19 libclang-19-dev lld-19 ninja-build
+
+      - name: Install GCC plugin dev
+        run: |
+          sudo apt-get install -y gcc-12-plugin-dev g++-12
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp build/lib/libKoviD*.so dist/ 2>/dev/null || true
+          cp build/bin/kovid-deobfuscator dist/ 2>/dev/null || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kovid-obfuscation-passes-linux-x64
+          path: dist/
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS arm64
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install LLVM 19
+        run: |
+          brew install llvm@19 ninja
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=$(brew --prefix llvm@19)/lib/cmake/llvm \
+            -DKOP_BUILD_GCC_PLUGINS=0
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp build/lib/libKoviD*.dylib dist/ 2>/dev/null || true
+          cp build/bin/kovid-deobfuscator dist/ 2>/dev/null || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kovid-obfuscation-passes-macos-arm64
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Compute release tag
+        id: vars
+        shell: bash
+        run: |
+          release_tag="${{ inputs.release_tag }}"
+          if [ -z "$release_tag" ]; then
+            release_tag="latest"
+          fi
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+          upload="true"
+          if [ '${{ github.event_name }}' = 'workflow_dispatch' ]; then
+            upload='${{ inputs.upload }}'
+          fi
+          echo "upload=$upload" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        if: steps.vars.outputs.upload == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Package artifacts
+        if: steps.vars.outputs.upload == 'true'
+        run: |
+          cd artifacts
+          zip -r ../kovid-obfuscation-passes-linux-x64.zip kovid-obfuscation-passes-linux-x64/
+          zip -r ../kovid-obfuscation-passes-macos-arm64.zip kovid-obfuscation-passes-macos-arm64/
+
+      - name: Update release tag
+        if: steps.vars.outputs.upload == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${{ steps.vars.outputs.release_tag }}" "${{ github.sha }}"
+          git push origin "refs/tags/${{ steps.vars.outputs.release_tag }}" --force
+
+      - name: Publish to GitHub Release
+        if: steps.vars.outputs.upload == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: kovid-obfuscation-passes (${{ steps.vars.outputs.release_tag }})
+          body: |
+            Multi-platform build of kovid-obfuscation-passes LLVM obfuscation plugins.
+
+            **Commit:** `${{ github.sha }}`
+            **Branch:** `${{ github.ref_name }}`
+
+            ### Downloads
+            - `kovid-obfuscation-passes-linux-x64.zip` — Linux x64 shared libraries + kovid-deobfuscator
+            - `kovid-obfuscation-passes-macos-arm64.zip` — macOS arm64 dylibs + kovid-deobfuscator
+
+            ### Usage
+            Load the plugins with your LLVM 19-compatible toolchain. See README for details.
+          files: |
+            kovid-obfuscation-passes-linux-x64.zip
+            kovid-obfuscation-passes-macos-arm64.zip
+          overwrite_files: true
+          make_latest: true
