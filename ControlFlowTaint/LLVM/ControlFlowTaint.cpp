@@ -46,6 +46,8 @@
 using namespace llvm;
 
 struct ControlFlowTaintPass : public PassInfoMixin<ControlFlowTaintPass> {
+  static bool isRequired() { return true; }
+
   // Simplified opaque predicate - always returns false
   Value *createSimpleOpaquePredicate(IRBuilder<> &builder) {
     // (x & 1) == 2 is always false (no odd number equals 2)
@@ -238,6 +240,14 @@ struct ControlFlowTaintPass : public PassInfoMixin<ControlFlowTaintPass> {
 
 PassPluginLibraryInfo getPassPluginInfo() {
   const auto callback = [](PassBuilder &PB) {
+    PB.registerPipelineParsingCallback(
+        [](StringRef Name, FunctionPassManager &FPM,
+           ArrayRef<PassBuilder::PipelineElement>) {
+          if (Name != "control-flow-taint")
+            return false;
+          FPM.addPass(ControlFlowTaintPass());
+          return true;
+        });
     PB.registerPipelineEarlySimplificationEPCallback(
         [&](ModulePassManager &MPM, auto) {
           MPM.addPass(createModuleToFunctionPassAdaptor(ControlFlowTaintPass()));
